@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS notified (
     sent_at  TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, code)
 );
+CREATE TABLE IF NOT EXISTS requirements (
+    user_id     TEXT PRIMARY KEY,
+    data        TEXT NOT NULL,   -- JSON: the requirement dict (hard/soft/notes)
+    updated_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -83,3 +88,26 @@ class Store:
         self.conn.execute(
             "INSERT OR IGNORE INTO notified (user_id, code) VALUES (?, ?)", (user_id, code))
         self.conn.commit()
+
+    # ── per-user requirements ────────────────────────────────────────────────
+
+    def save_requirement(self, user_id: str, req: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO requirements (user_id, data, updated_at) VALUES (?,?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated_at=CURRENT_TIMESTAMP",
+            (user_id, json.dumps(req, ensure_ascii=False)),
+        )
+        self.conn.commit()
+
+    def get_requirement(self, user_id: str) -> dict | None:
+        cur = self.conn.execute("SELECT data FROM requirements WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def delete_requirement(self, user_id: str) -> None:
+        self.conn.execute("DELETE FROM requirements WHERE user_id=?", (user_id,))
+        self.conn.commit()
+
+    def users_with_requirements(self) -> list[str]:
+        cur = self.conn.execute("SELECT user_id FROM requirements")
+        return [r["user_id"] for r in cur.fetchall()]

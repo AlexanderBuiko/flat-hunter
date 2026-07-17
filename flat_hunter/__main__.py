@@ -112,9 +112,35 @@ def cmd_scrape(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bot(args: argparse.Namespace) -> int:
+    """Run the Telegram bot (long-poll) + the interval scheduler."""
+    import threading
+
+    from .bot import FlatBot
+    from .config import Config
+    from .scheduler import run_loop
+
+    cfg = Config.from_env()
+    if not cfg.is_configured():
+        print("Set FLAT_HUNTER_BOT_TOKEN and FLAT_HUNTER_ALLOWED_USER_IDS (see .env.example).")
+        return 1
+    store = Store(cfg.db_path)
+    bot = FlatBot(cfg.bot_token, cfg.allowed_user_ids, store, provider=cfg.provider)
+    # Background sweep: every interval, hunt for each user and push new matches.
+    threading.Thread(
+        target=run_loop, name="flat-scheduler", daemon=True,
+        kwargs=dict(store=store, interval_s=cfg.interval_s, fetch_fn=bot._live_fetch,
+                    extract_fn=bot._extractor(), send_fn=bot.notify),
+    ).start()
+    print(f"flat-hunter bot running (provider={cfg.provider}, interval={cfg.interval_s}s). Ctrl+C to stop.")
+    bot.run()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="flat_hunter")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("bot", help="run the Telegram bot + scheduler").set_defaults(func=cmd_bot)
     sc = sub.add_parser("scrape", help="fetch/parse, store, hunt, print new matches")
     sc.add_argument("--fixture", help="parse a saved .html or .json instead of the network")
     sc.add_argument("--req", help="requirement JSON (hard/soft); omitted → a permissive default")

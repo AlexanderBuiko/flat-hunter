@@ -37,23 +37,32 @@ explicitly allows) — we do **not** touch `/_next/data/...`, which robots disal
 
 ## Status — phased build
 
-- **P1 (done): automation spine** — scrape/parse `__NEXT_DATA__` → SQLite → hard filter →
-  print new matches. Fully offline-testable via a saved fixture.
-- **P2 (next): AI extraction** — description → features (`ai/extract.py`, wired, needs the
-  jarvis core + Ollama).
-- **P3–P6**: ranking + tailored notifications, Telegram FSM registration, dedup/price RAG,
-  conversational requirement edits.
+- **P1 (done): automation spine** — scrape/parse `__NEXT_DATA__` → SQLite → hard filter.
+- **P2 (done): AI extraction** — free text → structured features + scam signals
+  (`ai/extract.py`); soft ranking + critical gating (`matching`, `pipeline`).
+- **P4 (done): Telegram bot** — registration by *describing* your flat (NL → schema,
+  `ai/requirements.py`), `/prefs` `/search` `/stop`, and interval notifications
+  (`bot.py`, `scheduler.py`).
+- **P5–P6 (next)**: embeddings dedup/relist + price-vs-comparables RAG; conversational
+  requirement edits.
 
 ## Run it
 
 ```bash
-pip install -e .                      # P1 spine (httpx only)
-# offline demo against the bundled fixture:
+pip install -e .[ai]                  # core + jarvis (LLM/RAG); or `-e .` for the P1 spine
+cp .env.example .env                  # add your bot token + Telegram user id
+
+# offline demo (no network/model):
 python -m flat_hunter scrape --fixture tests/fixtures/listings.json
-# live (polite, one page):
-python -m flat_hunter scrape --pages 1 --req my_requirement.json
+# live hunt with AI ranking (one polite page):
+python -m flat_hunter scrape --pages 1 --req my_requirement.json --provider openrouter
+# the actual product — Telegram bot + 3h scheduler:
+python -m flat_hunter bot
 pytest -q
 ```
+
+In Telegram: `/start` → describe your ideal flat in one message → the LLM builds your
+search → confirm → `/search` to check now, and you'll be pinged about new matches.
 
 `my_requirement.json` (hard = code-filtered, soft = LLM-judged in P3):
 
