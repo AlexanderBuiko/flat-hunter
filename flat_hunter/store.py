@@ -68,6 +68,12 @@ class Store:
                           (json.dumps(features, ensure_ascii=False), code))
         self.conn.commit()
 
+    def get_features(self, code: int) -> dict | None:
+        """Cached LLM features for a listing, or None if not extracted yet."""
+        cur = self.conn.execute("SELECT features FROM listings WHERE code=?", (code,))
+        row = cur.fetchone()
+        return json.loads(row["features"]) if row and row["features"] else None
+
     def already_notified(self, user_id: str, code: int) -> bool:
         cur = self.conn.execute(
             "SELECT 1 FROM notified WHERE user_id=? AND code=?", (user_id, code))
