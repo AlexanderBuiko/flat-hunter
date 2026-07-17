@@ -1,0 +1,22 @@
+[project]
+name = "flat-hunter"
+version = "0.1.0"
+description = "AI apartment watcher for realt.by — Telegram bot + scrape/extract/rank/notify pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+]
+
+# The AI layer reuses jarvis-cli's core (LLMGateway, indexing) via the thin adapter in
+# flat_hunter/adapter/. Pin it so upstream churn can't break us. Optional so the P1
+# spine + tests run without it.
+[project.optional-dependencies]
+ai = ["jarvis-cli"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["flat_hunter*"]
