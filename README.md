@@ -43,8 +43,10 @@ explicitly allows) — we do **not** touch `/_next/data/...`, which robots disal
 - **P4 (done): Telegram bot** — registration by *describing* your flat (NL → schema,
   `ai/requirements.py`), `/prefs` `/search` `/stop`, and interval notifications
   (`bot.py`, `scheduler.py`).
-- **P5–P6 (next)**: embeddings dedup/relist + price-vs-comparables RAG; conversational
-  requirement edits.
+- **P5 (done): dedup + pricing** — embeddings relist detection (`ai/dedup.py`) and
+  price-vs-comparables (`ai/pricing.py`), surfaced in notifications.
+- **P6 (done): conversational edits** — `/edit "raise budget to $700, drop the
+  dishwasher"` → LLM diffs your search → confirm (`ai/requirements.edit_requirement`).
 
 ## Run it
 
@@ -63,6 +65,7 @@ pytest -q
 
 In Telegram: `/start` → describe your ideal flat in one message → the LLM builds your
 search → confirm → `/search` to check now, and you'll be pinged about new matches.
+Tweak it any time with `/edit raise the budget to $700 and drop the dishwasher`.
 
 `my_requirement.json` (hard = code-filtered, soft = LLM-judged in P3):
 

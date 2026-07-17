@@ -60,6 +60,49 @@ def build_requirement(description: str, *, provider: str = "ollama") -> dict:
     return _coerce(obj)
 
 
+_EDIT_SYSTEM = (
+    "You update a saved rental search. Given the CURRENT search as JSON and a change "
+    "instruction, output the FULL updated JSON in the same shape (hard/soft/notes) — keep "
+    "everything the instruction doesn't touch, and only add/remove/adjust what it asks. "
+    "Use the same field and feature vocabulary. JSON only.\n"
+    "Feature vocabulary: " + ", ".join(FEATURE_KEYS)
+)
+
+
+def edit_requirement(current: dict, instruction: str, *, provider: str = "ollama") -> dict:
+    """Apply a natural-language change to an existing requirement, returning the new one."""
+    if not (instruction or "").strip():
+        return _coerce(current)
+    user = f"CURRENT:\n{json.dumps(current, ensure_ascii=False)}\n\nCHANGE: {instruction}"
+    raw = llm.complete(_EDIT_SYSTEM, user, provider=provider, temperature=0.1)
+    try:
+        start, end = raw.find("{"), raw.rfind("}")
+        obj = json.loads(raw[start:end + 1]) if start != -1 else {}
+    except (json.JSONDecodeError, ValueError):
+        obj = {}
+    return _coerce(obj) if obj else _coerce(current)
+
+
+def diff_requirements(old: dict, new: dict) -> str:
+    """A short human-readable list of what changed between two requirement dicts."""
+    lines: list[str] = []
+    oh, nh = old.get("hard", {}), new.get("hard", {})
+    for key in sorted(set(oh) | set(nh)):
+        if oh.get(key) != nh.get(key):
+            lines.append(f"• {key}: {oh.get(key, '—')} → {nh.get(key, '—')}")
+    os_, ns = old.get("soft", {}), new.get("soft", {})
+    for name in sorted(set(os_) | set(ns)):
+        if name not in ns:
+            lines.append(f"• drop want: {name}")
+        elif name not in os_:
+            lines.append(f"• add want: {name}")
+        elif os_[name] != ns[name]:
+            lines.append(f"• want {name}: {os_[name]} → {ns[name]}")
+    if old.get("notes", "") != new.get("notes", ""):
+        lines.append(f"• notes: {new.get('notes', '') or '—'}")
+    return "\n".join(lines) if lines else "(no changes)"
+
+
 def summarize_requirement(req: dict) -> str:
     """A short human-readable recap of a requirement dict (for the confirm step)."""
     hard, soft = req.get("hard", {}), req.get("soft", {})

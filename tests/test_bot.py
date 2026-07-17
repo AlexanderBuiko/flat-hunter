@@ -21,8 +21,11 @@ def bot(tmp_path, monkeypatch):
     fetch_fn = lambda: [Listing(code=10, rooms=2, price=500, currency="USD",
                                 address="Минск", title="Nice flat")]
     extract_fn = lambda l: {"dishwasher": True, "scam_risk": "low", "red_flags": []}
+    # fake edit: raise the budget to 700 and drop the dishwasher want
+    edit_req = lambda cur, text: {"hard": {**cur.get("hard", {}), "price_max": 700},
+                                  "soft": {}, "notes": cur.get("notes", "")}
     b = botmod.FlatBot("tkn", {"42"}, store, fetch_fn=fetch_fn, extract_fn=extract_fn,
-                       build_req=build_req)
+                       build_req=build_req, edit_req=edit_req)
     return b, sent, store
 
 
@@ -82,6 +85,39 @@ def test_search_sends_matches(bot):
     sent.clear()
     b.handle_update(_msg("/search"))
     assert "no new matches" in sent[-1][1].lower()
+
+
+def test_edit_inline_shows_diff_and_applies(bot):
+    b, sent, store = bot
+    store.save_requirement("99", {"hard": {"rooms": [2], "price_max": 600, "currency": "USD"},
+                                  "soft": {"dishwasher": {"want": True, "weight": 2}}, "notes": ""})
+    b.handle_update(_msg("/edit raise budget to 700, drop dishwasher"))
+    assert b._sessions["99"]["state"] == "confirm"
+    assert "proposed changes" in sent[-1][1].lower()
+    assert "price_max: 600 → 700" in sent[-1][1]
+    b.handle_update(_msg("yes"))
+    assert "99" not in b._sessions
+    assert store.get_requirement("99")["hard"]["price_max"] == 700
+    assert "updated" in sent[-1][1].lower()
+
+
+def test_edit_two_step_then_cancel_keeps_original(bot):
+    b, sent, store = bot
+    orig = {"hard": {"rooms": [2], "price_max": 600, "currency": "USD"}, "soft": {}, "notes": ""}
+    store.save_requirement("99", orig)
+    b.handle_update(_msg("/edit"))
+    assert b._sessions["99"]["state"] == "editing"
+    b.handle_update(_msg("raise budget to 700"))
+    assert b._sessions["99"]["state"] == "confirm"
+    b.handle_update(_msg("no"))
+    assert store.get_requirement("99")["hard"]["price_max"] == 600   # unchanged
+    assert "unchanged" in sent[-1][1].lower()
+
+
+def test_edit_without_requirement_prompts_start(bot):
+    b, sent, _ = bot
+    b.handle_update(_msg("/edit cheaper"))
+    assert "start" in sent[-1][1].lower()
 
 
 def test_stop_deletes_requirement(bot):

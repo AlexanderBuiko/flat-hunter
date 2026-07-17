@@ -16,7 +16,12 @@ import threading
 import time
 from typing import Callable
 
-from .ai.requirements import build_requirement, summarize_requirement
+from .ai.requirements import (
+    build_requirement,
+    diff_requirements,
+    edit_requirement,
+    summarize_requirement,
+)
 from .notify import format_match
 from .pipeline import Match
 from .scheduler import run_for_user
@@ -29,7 +34,8 @@ _INTRO = (
     "ideally renovated with a dishwasher, quiet\")."
 )
 _HELP = ("/start — set up (or redo) your search\n/prefs — show your current search\n"
-         "/search — check for matches now\n/stop — stop notifications")
+         "/edit <change> — tweak your search in words\n/search — check for matches now\n"
+         "/stop — stop notifications")
 
 
 def _call_telegram(token: str, method: str, params: dict, timeout: float = 35) -> dict:
@@ -44,7 +50,8 @@ class FlatBot:
     def __init__(self, token: str, allowed: set[str], store: Store, *, provider: str = "ollama",
                  fetch_fn: Callable[[], list] | None = None,
                  extract_fn: Callable | None = None,
-                 build_req: Callable[[str], dict] | None = None) -> None:
+                 build_req: Callable[[str], dict] | None = None,
+                 edit_req: Callable[[dict, str], dict] | None = None) -> None:
         self._token = token
         self._allowed = {str(a) for a in allowed}
         self._store = store
@@ -52,6 +59,7 @@ class FlatBot:
         self._fetch_fn = fetch_fn
         self._extract_fn = extract_fn
         self._build_req = build_req or (lambda text: build_requirement(text, provider=provider))
+        self._edit_req = edit_req or (lambda cur, text: edit_requirement(cur, text, provider=provider))
         self._sessions: dict[str, dict] = {}
         self._offset = 0
         self._stop = threading.Event()
@@ -77,22 +85,35 @@ class FlatBot:
             return  # ignore strangers silently
 
         if text.startswith("/"):
-            return self._command(chat, text.split()[0].lower())
+            cmd, _, rest = text.partition(" ")
+            return self._command(chat, cmd.lower(), rest.strip())
         sess = self._sessions.get(chat)
         if not sess:
             return self._send(chat, "Send /start to set up your search.")
         if sess["state"] == "describe":
             return self._on_describe(chat, text)
+        if sess["state"] == "editing":
+            return self._start_edit(chat, sess["current"], text)
         if sess["state"] == "confirm":
             return self._on_confirm(chat, text)
 
-    def _command(self, chat: str, cmd: str) -> None:
+    def _command(self, chat: str, cmd: str, rest: str = "") -> None:
         if cmd == "/start":
             self._sessions[chat] = {"state": "describe"}
             self._send(chat, _INTRO)
         elif cmd == "/prefs":
             req = self._store.get_requirement(chat)
             self._send(chat, summarize_requirement(req) if req else "No search yet — /start.")
+        elif cmd == "/edit":
+            cur = self._store.get_requirement(chat)
+            if not cur:
+                return self._send(chat, "No search yet — /start first.")
+            if rest:
+                self._start_edit(chat, cur, rest)
+            else:
+                self._sessions[chat] = {"state": "editing", "current": cur}
+                self._send(chat, "What should I change? (e.g. \"drop the dishwasher, "
+                                 "raise the budget to $700, closer to the centre\")")
         elif cmd == "/search":
             self._do_search(chat)
         elif cmd == "/stop":
@@ -107,18 +128,33 @@ class FlatBot:
         if not req.get("hard") and not req.get("soft"):
             return self._send(chat, "I couldn't read any criteria from that — try again with "
                                     "rooms / budget / must-haves.")
-        self._sessions[chat] = {"state": "confirm", "pending": req}
+        self._sessions[chat] = {"state": "confirm", "pending": req, "origin": "register"}
         self._send(chat, "Here's what I understood:\n\n" + summarize_requirement(req)
                    + "\n\nSave this search? (yes / no)")
 
-    def _on_confirm(self, chat: str, text: str) -> None:
-        if text.lower() in ("yes", "y", "да", "ok", "save"):
-            self._store.save_requirement(chat, self._sessions[chat]["pending"])
+    def _start_edit(self, chat: str, current: dict, instruction: str) -> None:
+        new = self._edit_req(current, instruction)
+        changes = diff_requirements(current, new)
+        if changes == "(no changes)":
             self._sessions.pop(chat, None)
-            self._send(chat, "✅ Saved. I'll notify you about new matches. /search to check now.")
-        elif text.lower() in ("no", "n", "нет"):
-            self._sessions[chat] = {"state": "describe"}
-            self._send(chat, "OK — describe your ideal flat again.")
+            return self._send(chat, "I couldn't turn that into a change — try /prefs then /edit.")
+        self._sessions[chat] = {"state": "confirm", "pending": new, "origin": "edit"}
+        self._send(chat, "Proposed changes:\n" + changes + "\n\nApply? (yes / no)")
+
+    def _on_confirm(self, chat: str, text: str) -> None:
+        sess = self._sessions[chat]
+        if text.lower() in ("yes", "y", "да", "ok", "save", "apply"):
+            self._store.save_requirement(chat, sess["pending"])
+            self._sessions.pop(chat, None)
+            done = "✅ Updated." if sess.get("origin") == "edit" else "✅ Saved."
+            self._send(chat, f"{done} /search to check now.")
+        elif text.lower() in ("no", "n", "нет", "cancel"):
+            self._sessions.pop(chat, None)
+            if sess.get("origin") == "edit":
+                self._send(chat, "Cancelled — your search is unchanged.")
+            else:
+                self._sessions[chat] = {"state": "describe"}
+                self._send(chat, "OK — describe your ideal flat again.")
         else:
             self._send(chat, "Please reply yes or no.")
 

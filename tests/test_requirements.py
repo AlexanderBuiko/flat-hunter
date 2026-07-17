@@ -36,6 +36,42 @@ def test_empty_description_skips_llm(monkeypatch):
     assert called["n"] == 0
 
 
+def test_edit_requirement_applies_change(monkeypatch):
+    cur = {"hard": {"rooms": [2], "price_max": 600, "currency": "USD"},
+           "soft": {"dishwasher": {"want": True, "weight": 2}}, "notes": ""}
+    updated = {"hard": {"rooms": [2], "price_max": 700, "currency": "USD"},
+               "soft": {}, "notes": ""}
+    monkeypatch.setattr(R.llm, "complete", lambda *a, **k: json.dumps(updated))
+    new = R.edit_requirement(cur, "raise budget to 700 and drop the dishwasher")
+    assert new["hard"]["price_max"] == 700
+    assert "dishwasher" not in new["soft"]
+
+
+def test_edit_empty_instruction_returns_current(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(R.llm, "complete", lambda *a, **k: called.__setitem__("n", 1) or "{}")
+    cur = {"hard": {"rooms": [2]}, "soft": {}, "notes": ""}
+    assert R.edit_requirement(cur, "  ")["hard"]["rooms"] == [2]
+    assert called["n"] == 0
+
+
+def test_diff_requirements_lists_changes():
+    old = {"hard": {"price_max": 600, "currency": "USD"},
+           "soft": {"dishwasher": {"want": True, "weight": 2}}, "notes": ""}
+    new = {"hard": {"price_max": 700, "currency": "USD"},
+           "soft": {"quiet": {"want": True, "weight": 3}}, "notes": "closer to centre"}
+    d = R.diff_requirements(old, new)
+    assert "price_max: 600 → 700" in d
+    assert "drop want: dishwasher" in d
+    assert "add want: quiet" in d
+    assert "notes: closer to centre" in d
+
+
+def test_diff_no_changes():
+    req = {"hard": {"rooms": [2]}, "soft": {}, "notes": ""}
+    assert R.diff_requirements(req, req) == "(no changes)"
+
+
 def test_summarize_is_readable():
     req = {"hard": {"rooms": [2], "price_max": 600, "currency": "USD", "floor_not_top": True},
            "soft": {"pets_allowed": {"want": True, "weight": 5, "critical": True}},
