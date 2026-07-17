@@ -78,6 +78,10 @@ def _print_match(m: Match) -> None:
     print(head)
     if lst.title:
         print(f"  {lst.title.strip()}")
+    if m.price is not None and m.price.verdict != "n/a":
+        print(f"  💰 {m.price.line()}")
+    if m.relist is not None:
+        print(f"  ♻️ {m.relist.line()}")
     if m.soft is not None:
         if m.soft.fits:
             print(f"  ✓ fits: {', '.join(m.soft.fits)}")
@@ -103,6 +107,10 @@ def cmd_scrape(args: argparse.Namespace) -> int:
 
     extractor = None if args.no_ai else _make_extractor(store, args.provider)
     matches = hunt(new, req, extract_fn=extractor)
+    # Enrich with price-vs-comparables (from the accumulated corpus). Dedup needs
+    # embeddings; skip it in the CLI unless a model is wired.
+    from .pipeline import enrich_matches
+    enrich_matches(matches, corpus=store.all_listings())
 
     print(f"fetched {len(listings)} · new {len(new)} · matched {len(matches)}\n")
     for m in matches:

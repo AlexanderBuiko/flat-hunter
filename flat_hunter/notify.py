@@ -14,6 +14,10 @@ def format_match(m: Match) -> str:
     lines = [f"🏠 {lst.rooms}-room · floor {lst.storey}/{lst.storeys} · {price}"]
     if lst.address:
         lines.append(lst.address)
+    if m.price is not None and m.price.verdict != "n/a":
+        lines.append(f"💰 {m.price.line()}")
+    if m.relist is not None:
+        lines.append(f"♻️ {m.relist.line()}")
     if m.soft is not None:
         lines.append(f"Match: {m.score}%")
         if m.soft.fits:

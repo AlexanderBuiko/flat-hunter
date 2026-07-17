@@ -20,6 +20,8 @@ class Match:
     listing: Listing
     features: dict | None
     soft: SoftResult | None
+    price: "PriceInfo | None" = None      # filled by enrich_matches (P5)
+    relist: "RelistInfo | None" = None
 
     @property
     def score(self) -> int:
@@ -55,4 +57,23 @@ def hunt(
         return (-m.score, risk)      # higher score first, riskier last
 
     matches.sort(key=_rank)
+    return matches
+
+
+def enrich_matches(
+    matches: list[Match],
+    corpus: list[Listing],
+    corpus_vecs: list[tuple[Listing, list[float]]] | None = None,
+    embed_fn: Callable[[str], list[float]] | None = None,
+) -> list[Match]:
+    """Attach price-vs-comparables (always) and relist detection (when embeddings are
+    available) to each match. Pure over its inputs, so it's easy to test."""
+    from .ai.dedup import find_relist
+    from .ai.pricing import price_verdict
+
+    for m in matches:
+        m.price = price_verdict(m.listing, corpus)
+        if embed_fn is not None and corpus_vecs:
+            vec = embed_fn(m.listing.free_text() or m.listing.title or "")
+            m.relist = find_relist(m.listing, vec, corpus_vecs) if vec else None
     return matches

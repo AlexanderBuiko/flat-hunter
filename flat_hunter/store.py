@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS listings (
     first_seen  TEXT DEFAULT CURRENT_TIMESTAMP,
     last_seen   TEXT DEFAULT CURRENT_TIMESTAMP,
     features    TEXT,           -- JSON: LLM-extracted features (filled in P2), else NULL
+    embedding   TEXT,           -- JSON: free-text embedding (P5 dedup), else NULL
     data        TEXT NOT NULL   -- JSON snapshot of the Listing
 );
 CREATE TABLE IF NOT EXISTS notified (
@@ -78,6 +79,38 @@ class Store:
         cur = self.conn.execute("SELECT features FROM listings WHERE code=?", (code,))
         row = cur.fetchone()
         return json.loads(row["features"]) if row and row["features"] else None
+
+    def set_embedding(self, code: int, vec: list[float]) -> None:
+        self.conn.execute("UPDATE listings SET embedding=? WHERE code=?",
+                          (json.dumps(vec), code))
+        self.conn.commit()
+
+    def get_embedding(self, code: int) -> list[float] | None:
+        cur = self.conn.execute("SELECT embedding FROM listings WHERE code=?", (code,))
+        row = cur.fetchone()
+        return json.loads(row["embedding"]) if row and row["embedding"] else None
+
+    def all_listings(self) -> list["Listing"]:
+        """Every stored listing, reconstructed (for price comparables / dedup corpus)."""
+        from dataclasses import fields as _fields
+        keep = {f.name for f in _fields(Listing)}
+        cur = self.conn.execute("SELECT data FROM listings")
+        out = []
+        for row in cur.fetchall():
+            d = {k: v for k, v in json.loads(row["data"]).items() if k in keep}
+            out.append(Listing(**d))
+        return out
+
+    def corpus_with_embeddings(self) -> list[tuple["Listing", list[float]]]:
+        """Stored listings that already have an embedding (dedup candidates)."""
+        from dataclasses import fields as _fields
+        keep = {f.name for f in _fields(Listing)}
+        cur = self.conn.execute("SELECT data, embedding FROM listings WHERE embedding IS NOT NULL")
+        out = []
+        for row in cur.fetchall():
+            d = {k: v for k, v in json.loads(row["data"]).items() if k in keep}
+            out.append((Listing(**d), json.loads(row["embedding"])))
+        return out
 
     def already_notified(self, user_id: str, code: int) -> bool:
         cur = self.conn.execute(
