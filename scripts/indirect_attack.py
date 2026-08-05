@@ -36,6 +36,19 @@ from flat_hunter.models import Listing
 
 PROVIDER = os.environ.get("JARVIS_LLM_PROVIDER", "ollama")
 
+# Optional harness-only model override, so the same attacks can be fired at any model
+# (e.g. ATTACK_MODEL=meta-llama/llama-3.3-70b-instruct on OpenRouter). The extractor does
+# not take a model argument, so we inject it at the llm seam rather than changing prod code.
+_MODEL = os.environ.get("ATTACK_MODEL", "").strip()
+if _MODEL:
+    _orig_complete = extract.llm.complete
+
+    def _complete_with_model(system: str, user: str, **kw):
+        kw.setdefault("model", _MODEL)
+        return _orig_complete(system, user, **kw)
+
+    extract.llm.complete = _complete_with_model
+
 # Zero-width joiner used to break up an instruction so a human skims past it while the
 # model still reads the letters. flat-hunter strips these before the model (Layer 1).
 _ZWJ = "​"
