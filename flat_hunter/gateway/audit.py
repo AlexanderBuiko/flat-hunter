@@ -91,6 +91,15 @@ class AuditLog:
                     fh.write(line + "\n")
             except OSError as exc:  # never let logging break a request
                 logger.warning("audit write failed: %s", exc)
+        # Also emit one line to the logger. On a container (Cloud Run) the JSONL file is
+        # not reachable from outside and is wiped on restart, so stdout logging is what
+        # makes an attack observable afterwards. Finding *kinds* only — the raw secret is
+        # never logged, same guarantee as the file (which stores kind + masked preview).
+        logger.info("audit outcome=%s client=%s model=%s input=%s output=%s cost_usd=%s tokens=%s/%s latency_ms=%s",
+                    outcome, client, model,
+                    [f["kind"] for f in entry["input_findings"]],
+                    [f["kind"] for f in entry["output_findings"]],
+                    cost_usd, prompt_tokens, completion_tokens, entry["latency_ms"])
         return entry
 
     def totals(self) -> dict:

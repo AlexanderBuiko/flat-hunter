@@ -137,3 +137,24 @@ def test_audit_line_stores_finding_kind_not_the_raw_secret(tmp_path):
     written = (tmp_path / "audit.jsonl").read_text()
     assert "openai_key" in written
     assert "TOPSECRET123456" not in written       # raw secret never hits the log
+
+
+def test_audit_record_emits_a_safe_log_line(tmp_path, caplog):
+    """Each record also logs one INFO line (Cloud Logging evidence) — kinds, not secrets."""
+    import logging
+
+    from flat_hunter.gateway.audit import AuditLog
+    from flat_hunter.gateway.guards import Finding
+
+    audit = AuditLog(tmp_path / "a.jsonl")
+    with caplog.at_level(logging.INFO, logger="flat_hunter.gateway.audit"):
+        audit.record(client="1.2.3.4", provider="openrouter", model="llama",
+                     outcome="completed",
+                     input_findings=[Finding("openai_key", "[REDACTED_API_KEY]", 0, 1,
+                                             "sk-or-v1-XXXX")],
+                     output_findings=[], prompt_tokens=10, completion_tokens=5,
+                     cost_usd=0.0001, latency_ms=12.0)
+    text = caplog.text
+    assert "audit outcome=completed" in text
+    assert "openai_key" in text          # the finding kind — the red-team evidence
+    assert "sk-or-v1-XXXX" not in text   # the masked preview is never logged
