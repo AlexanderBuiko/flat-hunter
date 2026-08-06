@@ -5,7 +5,8 @@ The request flow is one straight line, and each step is one of the modules in
 this package:
 
     rate limit (limiter) → input guard (guards.scan_input) → forward
-    (adapter.llm.complete_metered) → output guard (guards.scan_output)
+    (in-process adapter.llm.complete_metered, or the jarvis llm-core server over HTTP
+    when JARVIS_LLM_CORE_URL is set) → output guard (guards.scan_output)
     → audit + cost (audit.AuditLog)
 
 The transport is stdlib ``http.server`` — flat-hunter's only runtime dependency
@@ -44,6 +45,33 @@ def _default_complete(system: str, user: str, *, provider: str, model: str | Non
     """Forward through flat-hunter's usual seam — never ``jarvis.*`` directly."""
     from ..adapter.llm import complete_metered
     return complete_metered(system, user, provider=provider, model=model)
+
+
+def _core_complete(url: str) -> Callable[..., _Meter]:
+    """Forward to the standalone jarvis llm-core server (the 3-tier split).
+
+    When ``JARVIS_LLM_CORE_URL`` is set the gateway holds *only* security concerns and
+    calls the model over HTTP instead of importing jarvis in-process. The core returns
+    the same metered fields (usage + real cost), so the audit log is unchanged.
+    """
+    from ..adapter.llm import LLMResult
+
+    def _forward(system: str, user: str, *, provider: str, model: str | None) -> _Meter:
+        import httpx
+
+        payload: dict[str, Any] = {"system": system, "user": user, "provider": provider}
+        if model:
+            payload["model"] = model
+        resp = httpx.post(f"{url.rstrip('/')}/v1/complete", json=payload, timeout=120)
+        data = resp.json()
+        if resp.status_code != 200:
+            raise RuntimeError(f"llm-core error {resp.status_code}: {data.get('error') or data}")
+        return LLMResult(
+            text=(data.get("text") or "").strip(), model=data.get("model"),
+            prompt_tokens=data.get("prompt_tokens"), completion_tokens=data.get("completion_tokens"),
+            cost_usd=data.get("cost_usd"), latency_ms=data.get("latency_ms") or 0.0)
+
+    return _forward
 
 
 class Gateway:
@@ -190,8 +218,14 @@ def build_server(host: str, port: int, app: Gateway) -> ThreadingHTTPServer:
 
 
 def gateway_from_env() -> Gateway:
-    """Build a Gateway from ``FLAT_HUNTER_GATEWAY_*`` / ``JARVIS_LLM_PROVIDER``."""
+    """Build a Gateway from ``FLAT_HUNTER_GATEWAY_*`` / ``JARVIS_LLM_PROVIDER``.
+
+    When ``JARVIS_LLM_CORE_URL`` is set the gateway forwards to the standalone jarvis
+    llm-core server over HTTP (the 3-tier split); unset, it calls jarvis in-process.
+    """
+    core_url = os.environ.get("JARVIS_LLM_CORE_URL", "").strip()
     return Gateway(
+        complete_fn=_core_complete(core_url) if core_url else None,
         input_mode=os.environ.get("FLAT_HUNTER_GATEWAY_INPUT_MODE", "mask"),
         default_provider=os.environ.get("JARVIS_LLM_PROVIDER", "ollama"),
         rate_per_min=int(os.environ.get("FLAT_HUNTER_GATEWAY_RATE", "20")),
