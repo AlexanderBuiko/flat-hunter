@@ -126,3 +126,17 @@ def test_stop_deletes_requirement(bot):
     b.handle_update(_msg("/stop"))
     assert store.get_requirement("99") is None
     assert "stopped" in sent[-1][1].lower()
+
+
+def test_per_user_budget_throttles_repeated_llm_calls(bot):
+    b, sent, _ = bot
+    from flat_hunter.gateway.limiter import RateLimiter
+    b._budget = RateLimiter(1, 3600.0)               # one LLM action per user per window
+    b.handle_update(_msg("/start"))
+    b.handle_update(_msg("2 rooms under 800"))       # 1st describe: LLM runs, echoes back
+    assert "understood" in sent[-1][1].lower()
+    b.handle_update(_msg("/start"))
+    b.handle_update(_msg("2 rooms under 800"))       # 2nd describe: over budget, no LLM call
+    assert "usage limit" in sent[-1][1].lower()
+    b.handle_update(_msg("/stop"))                   # cheap command still works when budget spent
+    assert "stopped" in sent[-1][1].lower()

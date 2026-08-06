@@ -22,6 +22,7 @@ from .ai.requirements import (
     edit_requirement,
     summarize_requirement,
 )
+from .gateway.limiter import RateLimiter
 from .notify import format_match
 from .pipeline import Match
 from .scheduler import run_for_user
@@ -48,6 +49,7 @@ def _call_telegram(token: str, method: str, params: dict, timeout: float = 35) -
 
 class FlatBot:
     def __init__(self, token: str, allowed: set[str], store: Store, *, provider: str = "ollama",
+                 rate_max: int = 20, rate_window_s: float = 3600.0,
                  fetch_fn: Callable[[], list] | None = None,
                  extract_fn: Callable | None = None,
                  build_req: Callable[[str], dict] | None = None,
@@ -60,6 +62,11 @@ class FlatBot:
         self._extract_fn = extract_fn
         self._build_req = build_req or (lambda text: build_requirement(text, provider=provider))
         self._edit_req = edit_req or (lambda cur, text: edit_requirement(cur, text, provider=provider))
+        # Per-user flood cap. The gateway's own limiter is per-IP, and every bot call
+        # reaches it from the one bot IP, so it cannot throttle a single Telegram user.
+        # This is the per-user budget the threat model needs: a deterministic ceiling on
+        # how much model work one person can drive, independent of anything the model says.
+        self._budget = RateLimiter(rate_max, rate_window_s)
         self._sessions: dict[str, dict] = {}
         self._offset = 0
         self._stop = threading.Event()
@@ -73,6 +80,20 @@ class FlatBot:
     def notify(self, user_id: str, match: Match) -> None:
         """Push a new-listing notification (used by the scheduler)."""
         self._send(user_id, format_match(match))
+
+    def _within_budget(self, chat: str) -> bool:
+        """Return whether ``chat`` may drive another LLM call now; tell them if not.
+
+        Keyed on ``chat`` because every other per-user thing in the bot is (sessions,
+        stored requirement) and a private chat is one user. Checked at each LLM call
+        site rather than centrally, so cheap actions (/prefs, /stop, yes/no) do not
+        spend budget.
+        """
+        if self._budget.check(chat):
+            return True
+        wait = int(self._budget.retry_after(chat)) + 1
+        self._send(chat, f"⏳ Usage limit reached. Try again in ~{wait}s.")
+        return False
 
     # ── update handling (the FSM) ────────────────────────────────────────────
 
@@ -124,6 +145,8 @@ class FlatBot:
             self._send(chat, _HELP)
 
     def _on_describe(self, chat: str, text: str) -> None:
+        if not self._within_budget(chat):
+            return
         req = self._build_req(text)
         if not req.get("hard") and not req.get("soft"):
             return self._send(chat, "I couldn't read any criteria from that — try again with "
@@ -133,6 +156,8 @@ class FlatBot:
                    + "\n\nSave this search? (yes / no)")
 
     def _start_edit(self, chat: str, current: dict, instruction: str) -> None:
+        if not self._within_budget(chat):
+            return
         new = self._edit_req(current, instruction)
         changes = diff_requirements(current, new)
         if changes == "(no changes)":
@@ -162,6 +187,8 @@ class FlatBot:
         req = self._store.get_requirement(chat)
         if not req:
             return self._send(chat, "No search yet — /start first.")
+        if not self._within_budget(chat):
+            return
         fetch = self._fetch_fn or self._live_fetch
         matches = run_for_user(self._store, chat, req,
                                fetch_fn=fetch, extract_fn=self._extractor())
