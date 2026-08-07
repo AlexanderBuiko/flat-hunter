@@ -1,5 +1,7 @@
 """Telegram FSM tests — Telegram API and the LLM are faked; no network, no model."""
 
+from collections import deque
+
 import pytest
 
 from flat_hunter import bot as botmod
@@ -39,10 +41,28 @@ def test_rejects_strangers(bot):
     assert sent == []
 
 
-def test_no_session_prompts_start(bot):
+def test_no_session_shows_the_command_list(bot):
     b, sent, _ = bot
     b.handle_update(_msg("hello"))
-    assert "start" in sent[-1][1].lower()
+    reply = sent[-1][1].lower()
+    assert "/start" in reply and "/prefs" in reply and "/search" in reply
+
+
+def test_secret_split_across_messages_is_blocked(bot):
+    b, sent, _ = bot
+    b._sessions["99"] = {"state": "describe"}
+    b._history["99"] = deque(["please use sk-"], maxlen=6)      # earlier fragment
+    b.handle_update(_msg("projABCDEF123456 for auth"))          # clean alone; glued → sk-key
+    assert "blocked" in sent[-1][1].lower()
+    assert b._sessions["99"]["state"] == "describe"             # never reached the model / confirm
+
+
+def test_ordinary_messages_are_not_blocked_as_split_secret(bot):
+    b, sent, _ = bot
+    b.handle_update(_msg("/start"))
+    b.handle_update(_msg("2 rooms under 800 with a dishwasher"))
+    assert "blocked" not in sent[-1][1].lower()
+    assert b._sessions["99"]["state"] == "confirm"              # normal flow proceeded
 
 
 def test_registration_flow_saves_requirement(bot):
@@ -140,3 +160,16 @@ def test_per_user_budget_throttles_repeated_llm_calls(bot):
     assert "usage limit" in sent[-1][1].lower()
     b.handle_update(_msg("/stop"))                   # cheap command still works when budget spent
     assert "stopped" in sent[-1][1].lower()
+
+
+def test_per_user_burst_cap_throttles_a_spike_even_with_budget_left(bot):
+    b, sent, _ = bot
+    from flat_hunter.gateway.limiter import RateLimiter
+    b._burst = RateLimiter(1, 60.0)                  # one action per short window
+    b._budget = RateLimiter(100, 3600.0)             # sustained cap is NOT the binding one
+    b.handle_update(_msg("/start"))
+    b.handle_update(_msg("2 rooms under 800"))       # 1st describe: LLM runs
+    assert "understood" in sent[-1][1].lower()
+    b.handle_update(_msg("/start"))
+    b.handle_update(_msg("2 rooms under 800"))       # 2nd within the window: burst blocks it
+    assert "usage limit" in sent[-1][1].lower()

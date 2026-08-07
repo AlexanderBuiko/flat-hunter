@@ -12,8 +12,10 @@ Commands: /start (register), /prefs (show), /search (check now), /stop (unsubscr
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+from collections import deque
 from typing import Callable
 
 from .ai.requirements import (
@@ -22,11 +24,19 @@ from .ai.requirements import (
     edit_requirement,
     summarize_requirement,
 )
+from .gateway.guards import scan_secrets
 from .gateway.limiter import RateLimiter
 from .notify import format_match
 from .pipeline import Match
 from .scheduler import run_for_user
 from .store import Store
+
+logger = logging.getLogger("flat_hunter.bot")
+
+# How many recent messages per chat to keep for split-secret detection. A secret
+# smuggled in as fragments across separate messages is invisible to the stateless
+# gateway; the bot is the one tier that knows *who* the user is, so it holds this.
+_SPLIT_WINDOW = 6
 
 _INTRO = (
     "👋 I watch realt.by and ping you about new flats that fit you.\n\n"
@@ -50,6 +60,7 @@ def _call_telegram(token: str, method: str, params: dict, timeout: float = 35) -
 class FlatBot:
     def __init__(self, token: str, allowed: set[str], store: Store, *, provider: str = "ollama",
                  rate_max: int = 20, rate_window_s: float = 3600.0,
+                 burst_max: int = 6, burst_window_s: float = 60.0,
                  fetch_fn: Callable[[], list] | None = None,
                  extract_fn: Callable | None = None,
                  build_req: Callable[[str], dict] | None = None,
@@ -66,8 +77,12 @@ class FlatBot:
         # reaches it from the one bot IP, so it cannot throttle a single Telegram user.
         # This is the per-user budget the threat model needs: a deterministic ceiling on
         # how much model work one person can drive, independent of anything the model says.
+        # Two windows: a short *burst* cap so one user's spike cannot drain the gateway's
+        # shared per-minute bucket and starve everyone else, and a longer *sustained* cap.
+        self._burst = RateLimiter(burst_max, burst_window_s)
         self._budget = RateLimiter(rate_max, rate_window_s)
         self._sessions: dict[str, dict] = {}
+        self._history: dict[str, deque[str]] = {}   # recent messages per chat, for split-secret
         self._offset = 0
         self._stop = threading.Event()
 
@@ -89,10 +104,36 @@ class FlatBot:
         site rather than centrally, so cheap actions (/prefs, /stop, yes/no) do not
         spend budget.
         """
-        if self._budget.check(chat):
+        # Burst first (short window), then the sustained hourly cap. Either one over
+        # the limit denies the action and reports how long to wait.
+        for limiter in (self._burst, self._budget):
+            if not limiter.check(chat):
+                wait = int(limiter.retry_after(chat)) + 1
+                self._send(chat, f"⏳ Usage limit reached. Try again in ~{wait}s.")
+                return False
+        return True
+
+    def _carries_split_secret(self, chat: str, text: str) -> bool:
+        """True if this message alone is clean but the recent window hides a secret.
+
+        The gateway masks a secret that fits in one request; what it cannot see is a
+        secret dribbled out over several messages. If ``text`` on its own has no
+        secret but the window joined together does, that is the split attack — block
+        it and reset the window. Concatenation ``"".join`` catches directly glued
+        fragments (``"sk-"`` then ``"proj-…"``); entropy is off there so benign text
+        run together does not trip.
+        """
+        if scan_secrets(text):
+            return False                      # single-message secret — the gateway handles it
+        hist = self._history.get(chat)
+        if not hist or len(hist) < 2:
+            return False
+        if scan_secrets("".join(hist), entropy=False) or scan_secrets(" ".join(hist)):
+            logger.warning("split-secret blocked for chat=%s (%d msgs)", chat, len(hist))
+            self._history.pop(chat, None)
+            self._send(chat, "⚠️ That looks like a secret spread across messages — blocked. "
+                             "Please don't send API keys, tokens, or card numbers.")
             return True
-        wait = int(self._budget.retry_after(chat)) + 1
-        self._send(chat, f"⏳ Usage limit reached. Try again in ~{wait}s.")
         return False
 
     # ── update handling (the FSM) ────────────────────────────────────────────
@@ -105,12 +146,18 @@ class FlatBot:
         if not chat or user not in self._allowed:
             return  # ignore strangers silently
 
+        if text:
+            self._history.setdefault(chat, deque(maxlen=_SPLIT_WINDOW)).append(text)
+
         if text.startswith("/"):
             cmd, _, rest = text.partition(" ")
             return self._command(chat, cmd.lower(), rest.strip())
         sess = self._sessions.get(chat)
         if not sess:
-            return self._send(chat, "Send /start to set up your search.")
+            # A freshly-allowed user (e.g. a red-team partner) lands here on their first
+            # message. Show the command list — it leads with /start — so the bot is
+            # self-documenting instead of pointing at one command they can't see yet.
+            return self._send(chat, _HELP)
         if sess["state"] == "describe":
             return self._on_describe(chat, text)
         if sess["state"] == "editing":
@@ -147,6 +194,8 @@ class FlatBot:
     def _on_describe(self, chat: str, text: str) -> None:
         if not self._within_budget(chat):
             return
+        if self._carries_split_secret(chat, text):
+            return
         req = self._build_req(text)
         if not req.get("hard") and not req.get("soft"):
             return self._send(chat, "I couldn't read any criteria from that — try again with "
@@ -157,6 +206,8 @@ class FlatBot:
 
     def _start_edit(self, chat: str, current: dict, instruction: str) -> None:
         if not self._within_budget(chat):
+            return
+        if self._carries_split_secret(chat, instruction):
             return
         new = self._edit_req(current, instruction)
         changes = diff_requirements(current, new)
