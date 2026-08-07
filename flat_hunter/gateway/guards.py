@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import math
 import re
+from collections import Counter
 from typing import Callable, NamedTuple
 
 # ── data carriers ────────────────────────────────────────────────────────────
@@ -123,6 +125,42 @@ def _literal_findings(text: str) -> list[Finding]:
     return out
 
 
+# A long, unbroken alphanumeric run — the shape of a token with no known prefix.
+_TOKEN_RE = re.compile(r"\b[A-Za-z0-9]{24,}\b")
+
+
+def _shannon_bits(s: str) -> float:
+    """Shannon entropy in bits per character — how unpredictable the string is.
+
+    A machine-generated secret spreads its characters near-uniformly and scores
+    high; a long English word repeats a few letters and scores low. This is the
+    signal the prefix/Luhn detectors lack.
+    """
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in Counter(s).values()) if n else 0.0
+
+
+def _entropy_findings(text: str, claimed: list[tuple[int, int]]) -> list[Finding]:
+    """High-entropy tokens with no known prefix — a secret the pattern detectors miss.
+
+    Deliberately narrow to avoid false positives: 24+ chars, *both* letters and
+    digits (the fingerprint of a generated key, not a word), entropy over 3.5
+    bits/char, and not already claimed by a stronger detector.
+    """
+    out: list[Finding] = []
+    for m in _TOKEN_RE.finditer(text):
+        s, e = m.start(), m.end()
+        if any(s < ce and cs < e for cs, ce in claimed):
+            continue
+        tok = m.group()
+        if not (any(c.isalpha() for c in tok) and any(c.isdigit() for c in tok)):
+            continue
+        if _shannon_bits(tok) < 3.5:
+            continue
+        out.append(Finding("high_entropy_secret", _REDACT_KEY, s, e, f"entropy ({len(tok)} chars)"))
+    return out
+
+
 def _encoded_findings(text: str) -> list[Finding]:
     """base64 blobs that decode to something a detector recognises."""
     out: list[Finding] = []
@@ -155,11 +193,60 @@ def _split_secret(text: str) -> Finding | None:
     return None
 
 
+# Known jailbreak / role-play markers. Case-insensitive; kept narrow because the
+# app's real input is an apartment description — these phrases are clearly out of
+# that domain, so a match is a strong signal with little false-positive risk here.
+_JAILBREAK_RE = re.compile(
+    r"ignore (?:all |any )?(?:the )?(?:previous|prior|earlier|above) (?:instructions?|prompts?|rules?)"
+    r"|disregard (?:the |your )?(?:previous |system )?(?:instructions?|prompt|rules?)"
+    r"|forget (?:all |everything )?(?:your |the )?(?:previous |above )?(?:instructions?|rules?)"
+    r"|you are (?:now )?dan\b|\bdan mode\b|do anything now"
+    r"|developer mode|\bjailbreak\b"
+    r"|no (?:restrictions|limitations|filters?)|without (?:any )?(?:restrictions|limitations|filters?)"
+    r"|you are (?:now )?(?:an? )?(?:unrestricted|unfiltered|uncensored)"
+    r"|pretend (?:to be|you are|that you)"
+    r"|bypass your (?:rules|guidelines|restrictions|safety)",
+    re.I)
+
+
+def _jailbreak_findings(text: str) -> list[Finding]:
+    """Known jailbreak markers — flagged for the audit log, never masked or blocked.
+
+    A probabilistic model cannot be *prevented* from adopting a persona, and the other
+    layers (schema coercion, output guard, no tools) already make a successful jailbreak
+    harmless. This exists to make the *attempt* observable: the finding rides into the
+    audit record so a DAN-style try shows up as ``input=['jailbreak_attempt']`` in logs.
+    """
+    m = _JAILBREAK_RE.search(text)
+    if not m:
+        return []
+    return [Finding("jailbreak_attempt", "[FLAGGED]", -1, -1, f"marker: {m.group()[:24]}")]
+
+
 def _mask(text: str, findings: list[Finding]) -> str:
     """Replace each literal-span finding with its placeholder, right to left."""
     for f in sorted((f for f in findings if f.start >= 0), key=lambda f: f.start, reverse=True):
         text = text[:f.start] + f.placeholder + text[f.end:]
     return text
+
+
+# ── public: secret detection (no masking, no split) ──────────────────────────
+
+def scan_secrets(text: str, *, entropy: bool = True) -> list[Finding]:
+    """Every secret finding in ``text`` — literal patterns, base64, high-entropy
+    tokens — with spans de-conflicted so they never overlap.
+
+    Public and stateless so a per-user caller (the bot) can reuse the exact same
+    detection across message boundaries, closing the split-across-messages gap the
+    stateless proxy cannot see. ``entropy=False`` restricts it to structured secrets
+    for callers that glue fragments and would otherwise trip on benign concatenations.
+    """
+    literal = _literal_findings(text)
+    encoded = _encoded_findings(text)
+    if not entropy:
+        return literal + encoded
+    claimed = [(f.start, f.end) for f in literal + encoded if f.start >= 0]
+    return literal + encoded + _entropy_findings(text, claimed)
 
 
 # ── public: input guard ──────────────────────────────────────────────────────
@@ -175,21 +262,27 @@ def scan_input(text: str, *, mode: str = "mask") -> InputVerdict:
     if mode == "off":
         return InputVerdict("allow", text, [], "")
 
-    findings = _literal_findings(text) + _encoded_findings(text)
+    secrets = scan_secrets(text)
     split = _split_secret(text)
     if split:
-        findings.append(split)
+        secrets.append(split)
+    flags = _jailbreak_findings(text)          # observability only — never masks or blocks
+    findings = secrets + flags
 
     if not findings:
         return InputVerdict("allow", text, [], "")
 
     kinds = ", ".join(sorted({f.kind for f in findings}))
+    if not secrets:
+        # Only a jailbreak flag: forward the text (the model resists, the other layers
+        # contain the damage) but carry the finding so the attempt is logged, not dropped.
+        return InputVerdict("allow", text, findings, f"flagged: {kinds}")
     if mode == "block" or split is not None:
         why = ("secret split across fragments cannot be masked; blocked"
                if split is not None and mode != "block" else f"secret(s) detected: {kinds}")
         return InputVerdict("block", text, findings, why)
 
-    return InputVerdict("mask", _mask(text, findings), findings, f"masked: {kinds}")
+    return InputVerdict("mask", _mask(text, secrets), findings, f"masked: {kinds}")
 
 
 # ── output detectors (things the model should not have said) ──────────────────
@@ -231,6 +324,9 @@ def scan_output(text: str, *, system_prompt: str | None = None) -> OutputVerdict
     for m in _SHELL_RE.finditer(text):
         findings.append(Finding("shell_command", "[BLOCKED]", m.start(), m.end(),
                                 f"cmd: {m.group().strip()[:20]}"))
+    # Entropy last, skipping anything already claimed above (a URL is high-entropy too).
+    claimed = [(f.start, f.end) for f in findings if f.start >= 0]
+    findings += _entropy_findings(text, claimed)
 
     echo = _prompt_echo(text, system_prompt)
     if echo:

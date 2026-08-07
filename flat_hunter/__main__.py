@@ -134,7 +134,8 @@ def cmd_bot(args: argparse.Namespace) -> int:
         return 1
     store = Store(cfg.db_path)
     bot = FlatBot(cfg.bot_token, cfg.allowed_user_ids, store, provider=cfg.provider,
-                  rate_max=cfg.user_rate_max, rate_window_s=cfg.user_rate_window_s)
+                  rate_max=cfg.user_rate_max, rate_window_s=cfg.user_rate_window_s,
+                  burst_max=cfg.user_burst_max, burst_window_s=cfg.user_burst_window_s)
     # Background sweep: every interval, hunt for each user and push new matches.
     threading.Thread(
         target=run_loop, name="flat-scheduler", daemon=True,
