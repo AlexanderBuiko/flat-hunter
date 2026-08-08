@@ -6,17 +6,18 @@ This note is everything you need to start. For what the app does in general, see
 
 ## The target
 
-A **Telegram bot**. You talk to it in plain language; there is no web form and no
-public HTTP endpoint. The interesting part: when you describe an apartment, your
-message is handed to a language model that turns it into a structured search. So the
-model reads your text — that is the surface to probe.
+**[@JarvisRealtorBot](https://t.me/JarvisRealtorBot)** on Telegram. You talk to it in
+plain language; there is no web form and no public HTTP endpoint. The interesting part:
+when you describe an apartment, your message is handed to a language model that turns it
+into a structured search. So the model reads your text — that is the surface to probe.
 
 ## Getting in
 
-The bot answers only known users. To be let in:
+The bot answers only allow-listed users. To be let in:
 
 1. Message `@userinfobot` on Telegram — it replies with your numeric **user id**.
-2. Send that id to me (the defender). I add you and share the bot handle.
+2. Send that id to me (the defender). Once I add you, open **@JarvisRealtorBot** and
+   send `/start`.
 
 ## How to talk to it
 
